@@ -1,4 +1,4 @@
-pragma solidity 0.4.26;
+pragma solidity 0.4.17;
 
 /**
  * @title SafeMath
@@ -31,10 +31,20 @@ library SafeMath {
 }
 
  
+// contract Token {
+//         function transfer(address to, uint256 value) public constant returns (bool success) ;
+//         function transferFrom(address from, address to, uint256 value) public constant returns (bool success) ;
+//     }
 interface Token {
-        function transfer(address to, uint256 value) external returns (bool success);
-        function transferFrom(address from, address to, uint256 value) external returns (bool success);
-    }
+    function totalSupply() public constant returns (uint);
+    function balanceOf(address tokenOwner) public constant returns (uint balance);
+    function allowance(address tokenOwner, address spender) public constant returns (uint remaining);
+    function transfer(address to, uint tokens) public returns (bool success);
+    function approve(address spender, uint tokens) public returns (bool success);
+    function transferFrom(address from, address to, uint tokens) public returns (bool success);
+    event Transfer(address indexed from, address indexed to, uint tokens);
+    event Approval(address indexed tokenOwner, address indexed spender, uint tokens);
+}
 contract exchange{
 
    using SafeMath for uint256;
@@ -58,8 +68,6 @@ contract exchange{
   }
   mapping(uint => Order[]) public sell_orders; // price => Order
   mapping(uint => Order[]) public buy_orders; // price => Order
-  Token quote_token;
-  Token base_token
   uint[] public all_sell_price;
    modifier is_support_coin(address coin_addr) {
     require(coin_addr==base_coin_addr || coin_addr==quote_coin_addr);
@@ -74,39 +82,30 @@ contract exchange{
    //add coin pairs
 
    //erc20相当于usdt
-   constructor(address add_erc20, address add_erc721) public
+   function exchange(address add_erc20, address add_erc721) public
    {
        base_coin_addr=add_erc20;
        quote_coin_addr=add_erc721;
-       base_token= Token(base_coin_addr);
-        quote_token= Token(quote_coin_addr);
    }
    // deposit
-   function deposit(address coin_addr, uint amount ) is_support_coin(coin_addr) external {
-    if (quote_token.transfer(this, amount))
-    {
+   function deposit(address coin_addr, uint amount ) is_support_coin(coin_addr)  public {
+       
+    // need approve first
+    if (!Token(coin_addr).transferFrom(msg.sender,this, amount)) revert();
       //add balance in exchange
-        normal_balances[coin_addr][msg.sender]= normal_balances[coin_addr][msg.sender].add(amount);
-    }
-    else
-    {
-        revert();
-    }
+      //transferFrom 
+    normal_balances[coin_addr][msg.sender]= normal_balances[coin_addr][msg.sender].add(amount);
+   
   }
     
-     // 
-   function withdraw(address coin_addr, uint amount ) is_support_coin(coin_addr) external {
-    if (normal_balances[coin_addr][msg.sender]>=amount)
-    {
-      //sub balance in exchange
-        normal_balances[coin_addr][msg.sender]=normal_balances[coin_addr][msg.sender].sub(amount);
+     //withdraw can choose token 
+   function withdraw(address coin_addr, uint amount ) is_support_coin(coin_addr) public {
+    require(normal_balances[coin_addr][msg.sender]>=amount);
+    
+     //sub balance in exchange
+    normal_balances[coin_addr][msg.sender]=normal_balances[coin_addr][msg.sender].sub(amount);
         //transfer to owner
-        base_token.transfer(this, amount);
-    }
-    else
-    {
-        revert();
-    }
+    Token(coin_addr).transfer(msg.sender, amount);
    }
     //"SELL"
     function sell(address coin_addr,string memory side,uint volume,uint price)  is_support_coin(coin_addr) public
@@ -129,8 +128,6 @@ contract exchange{
             uint price=all_sell_price[i];
             if(buy_price>=price)
             {
-        
-                
                 uint  still_need_match_volume; //还需要的
                 
                 for (uint j=0;j<sell_orders[price].length;j++)
@@ -140,8 +137,7 @@ contract exchange{
                     uint remain_volume=ord.volume-ord.matched_volume;  //left amount of this sell order 
                     if (still_need_match_volume==0)  //finished match
                     {
-                        finished_match=true;
-                        break;
+                        return;
                     }
                     
                     if (ord.status==1) //had  finished orders
@@ -159,17 +155,21 @@ contract exchange{
                                 matched_amount+=remain_volume;
                                 // change balance in exchange
                                 
-                                change_balance_after_match(msg.sender,ord.user_addr,remain_volume-fee_amount_per);
+                                change_balance_after_match(msg.sender,ord.user_addr,remain_volume);
                                
-                               // get fee of exchange
-                                all_fee_income+=fee_amount_per;
-                                normal_balances[quote_coin_addr][this]=normal_balances[quote_coin_addr][this].add(fee_amount_per);
-                                
                                 //set sell order's status
                                 sell_orders[price][j].matched_volume=sell_orders[price][j].volume;
                                 //set to all matched
                                 sell_orders[price][j].status=1;
                                 
+                                //take fee from seller 
+                                if (remain_volume>=fee_amount_per)
+                                {
+                                    all_fee_income+=fee_amount_per;
+                                    normal_balances[quote_coin_addr][this]=normal_balances[quote_coin_addr][this].add(fee_amount_per);
+                                    normal_balances[quote_coin_addr][ord.user_addr]=normal_balances[quote_coin_addr][ord.user_addr].sub(fee_amount_per);
+                                }
+                               
                         }
                         //all macted 
                         else if (still_need_match_volume< remain_volume)
@@ -202,7 +202,11 @@ contract exchange{
             }
         }
         //set buyer's order status
-        if (matched_amount==volume)
+        if (matched_amount==0)
+        {
+             buy_orders[buy_price][buyer_order_index].status=0;
+        }
+        else if (matched_amount==volume)
         {
             buy_orders[buy_price][buyer_order_index].status=1;
             buy_orders[buy_price][buyer_order_index].matched_volume=volume;
@@ -213,6 +217,7 @@ contract exchange{
             buy_orders[buy_price][buyer_order_index].matched_volume=matched_amount;
         }
         
+       
         
     } 
     
@@ -261,5 +266,36 @@ contract exchange{
             buy_order_amount+=1;
             return buy_orders[price].length-1;
         }
+        
+
     }
+    function get_base_coin_balance(address addr) public  view returns(uint)   
+    {
+        return Token(base_coin_addr).balanceOf(addr);
+    }
+    function get_quote_coin_balance(address addr) public view returns (uint) 
+    {
+        return Token(quote_coin_addr).balanceOf(addr);
+    }
+    function get_ex_base_coin_normal_balance(address addr) public view returns (uint) 
+    {
+        return normal_balances[base_coin_addr][addr];
+    }
+
+     function get_ex_quote_coin_normal_balance(address addr) public view returns (uint) 
+    {
+        return normal_balances[quote_coin_addr][addr];
+    }
+    
+    function get_ex_base_coin_freeze_balance(address addr) public view returns (uint) 
+    {
+        return freeze_balances[base_coin_addr][addr];
+    }
+
+     function get_ex_quote_coin_freeze_balance(address addr) public view returns (uint) 
+    {
+        return freeze_balances[quote_coin_addr][addr];
+    }
+  
+  
 }
